@@ -1,17 +1,31 @@
 /**
- * Manual auth refresh flow test.
+ * Manual auth refresh flow test (httpOnly cookie).
  * Run: node scripts/testRefreshAuth.js
  * Requires server running on PORT (default 2000).
  */
 import jwt from "jsonwebtoken";
 
 const BASE = `http://localhost:${process.env.PORT || 2000}/api`;
+let cookieJar = "";
+
+function parseSetCookie(headers) {
+  const raw = headers.getSetCookie?.() || [];
+  for (const c of raw) {
+    const part = c.split(";")[0];
+    if (part.startsWith("refreshToken=")) cookieJar = part;
+  }
+}
 
 async function request(path, options = {}) {
+  const headers = { "Content-Type": "application/json", ...(options.headers || {}) };
+  if (cookieJar) headers.Cookie = cookieJar;
+
   const res = await fetch(`${BASE}${path}`, {
-    headers: { "Content-Type": "application/json", ...(options.headers || {}) },
     ...options,
+    headers,
+    credentials: "include",
   });
+  parseSetCookie(res.headers);
   const data = await res.json().catch(() => ({}));
   return { status: res.status, data };
 }
@@ -27,11 +41,16 @@ async function main() {
     process.exit(1);
   }
 
-  const { accessToken, refreshToken, token } = login.data;
-  if (!accessToken || !refreshToken || !token) {
-    console.error("Missing tokens in login response", login.data);
+  const { accessToken, token } = login.data;
+  if (!accessToken || !token) {
+    console.error("Missing access token in login response", login.data);
     process.exit(1);
   }
+  if (!cookieJar) {
+    console.error("Missing refreshToken cookie after login");
+    process.exit(1);
+  }
+  console.log("Login OK — refresh cookie set");
 
   const dashboard = await request("/dashboard", {
     headers: { Authorization: `Bearer ${accessToken}` },
@@ -40,6 +59,7 @@ async function main() {
     console.error("Dashboard failed with access token:", dashboard.status, dashboard.data);
     process.exit(1);
   }
+  console.log("Dashboard OK with access token");
 
   const expiredAccess = jwt.sign(
     { id: login.data.user._id, role: login.data.user.role },
@@ -54,15 +74,14 @@ async function main() {
     console.error("Expected 401 for expired access token, got:", expiredDashboard.status);
     process.exit(1);
   }
+  console.log("Expired access token correctly rejected");
 
-  const refreshed = await request("/auth/refresh", {
-    method: "POST",
-    body: JSON.stringify({ refreshToken }),
-  });
+  const refreshed = await request("/auth/refresh", { method: "POST", body: "{}" });
   if (refreshed.status !== 200 || !refreshed.data.accessToken) {
     console.error("Refresh failed:", refreshed.status, refreshed.data);
     process.exit(1);
   }
+  console.log("Refresh OK via cookie");
 
   const dashboardAfterRefresh = await request("/dashboard", {
     headers: { Authorization: `Bearer ${refreshed.data.accessToken}` },
@@ -71,24 +90,21 @@ async function main() {
     console.error("Dashboard failed after refresh:", dashboardAfterRefresh.status);
     process.exit(1);
   }
+  console.log("Dashboard OK after refresh");
 
-  const logout = await request("/auth/logout", {
-    method: "POST",
-    body: JSON.stringify({ refreshToken: refreshed.data.refreshToken }),
-  });
+  const logout = await request("/auth/logout", { method: "POST", body: "{}" });
   if (logout.status !== 200) {
     console.error("Logout failed:", logout.status, logout.data);
     process.exit(1);
   }
+  console.log("Logout OK");
 
-  const refreshAfterLogout = await request("/auth/refresh", {
-    method: "POST",
-    body: JSON.stringify({ refreshToken: refreshed.data.refreshToken }),
-  });
+  const refreshAfterLogout = await request("/auth/refresh", { method: "POST", body: "{}" });
   if (refreshAfterLogout.status !== 401) {
     console.error("Expected 401 after logout refresh, got:", refreshAfterLogout.status);
     process.exit(1);
   }
+  console.log("Refresh correctly rejected after logout");
 
   console.log("All refresh auth tests passed.");
 }
